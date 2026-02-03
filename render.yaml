@@ -1,0 +1,40 @@
+databases:
+  - name: vantrack-db
+    plan: free
+    databaseName: vantrack
+    user: vantrack
+
+services:
+  - type: web
+    name: vantrack-api
+    plan: free
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: POSTGRES_SERVER
+        fromDatabase:
+          name: vantrack-db
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: vantrack-db
+          property: port
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: vantrack-db
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: vantrack-db
+          property: password
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: vantrack-db
+          property: database
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
