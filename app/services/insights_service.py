@@ -652,3 +652,179 @@ def calculate_spending_comparisons(
         "percentile": percentile,
         "summary": f"You're doing better than average in {better_count} of {total_count} categories"
     }
+
+
+def calculate_smart_predictions(
+    transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """
+    Calculate smart predictions including:
+    1. Cash flow forecast for end of month
+    2. Bill reminders based on recurring patterns
+    3. Debt payoff timeline
+    """
+    now = datetime.utcnow()
+    current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    days_in_month = 30  # Simplified
+    days_passed = now.day
+    days_remaining = days_in_month - days_passed
+    
+    # Analyze last 90 days for patterns
+    ninety_days_ago = now - timedelta(days=90)
+    recent_transactions = [
+        t for t in transactions
+        if datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= ninety_days_ago
+    ]
+    
+    # Current month transactions
+    current_month_txs = [
+        t for t in transactions
+        if datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= current_month_start
+    ]
+    
+    # === 1. CASH FLOW FORECAST ===
+    # Calculate average daily income and expenses from last 90 days
+    total_income_90d = sum(t['amount'] for t in recent_transactions if t['type'] == 'income')
+    total_expenses_90d = sum(t['amount'] for t in recent_transactions if t['type'] == 'expense')
+    
+    avg_daily_income = total_income_90d / 90 if recent_transactions else 0
+    avg_daily_expenses = total_expenses_90d / 90 if recent_transactions else 0
+    
+    # Current month actuals
+    current_income = sum(t['amount'] for t in current_month_txs if t['type'] == 'income')
+    current_expenses = sum(t['amount'] for t in current_month_txs if t['type'] == 'expense')
+    current_balance = current_income - current_expenses
+    
+    # Projected end of month
+    projected_income = current_income + (avg_daily_income * days_remaining)
+    projected_expenses = current_expenses + (avg_daily_expenses * days_remaining)
+    projected_balance = projected_income - projected_expenses
+    
+    cash_flow_forecast = {
+        "current_balance": round(current_balance, 2),
+        "projected_end_of_month": round(projected_balance, 2),
+        "projected_income": round(projected_income, 2),
+        "projected_expenses": round(projected_expenses, 2),
+        "days_remaining": days_remaining,
+        "trend": "positive" if projected_balance > current_balance else "negative",
+        "message": f"Based on your patterns, you'll have ~{currency_symbol}{abs(projected_balance):,.0f} by end of month."
+    }
+    
+    # === 2. BILL REMINDERS ===
+    # Find recurring expenses by analyzing description patterns and dates
+    expense_patterns = {}
+    for t in recent_transactions:
+        if t['type'] == 'expense':
+            desc_lower = t['description'].lower()
+            tx_date = datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', ''))
+            day_of_month = tx_date.day
+            
+            # Group by similar descriptions
+            key = None
+            for keyword in ['rent', 'mortgage', 'electric', 'water', 'internet', 'phone', 'insurance', 
+                           'subscription', 'netflix', 'spotify', 'gym', 'loan', 'car payment']:
+                if keyword in desc_lower:
+                    key = keyword
+                    break
+            
+            if not key:
+                # Use first two words as key
+                words = desc_lower.split()[:2]
+                key = ' '.join(words) if words else desc_lower[:20]
+            
+            if key not in expense_patterns:
+                expense_patterns[key] = {'amounts': [], 'days': [], 'descriptions': []}
+            
+            expense_patterns[key]['amounts'].append(t['amount'])
+            expense_patterns[key]['days'].append(day_of_month)
+            expense_patterns[key]['descriptions'].append(t['description'])
+    
+    # Find recurring bills (appeared 2+ times with similar amounts)
+    bill_reminders = []
+    for key, data in expense_patterns.items():
+        if len(data['amounts']) >= 2:
+            avg_amount = sum(data['amounts']) / len(data['amounts'])
+            # Check if amounts are consistent (within 20% of average)
+            is_consistent = all(abs(a - avg_amount) / avg_amount < 0.2 for a in data['amounts']) if avg_amount > 0 else False
+            
+            if is_consistent:
+                avg_day = round(sum(data['days']) / len(data['days']))
+                
+                # Check if due soon (within next 7 days)
+                days_until_due = avg_day - now.day
+                if days_until_due < 0:
+                    days_until_due += 30  # Next month
+                
+                is_upcoming = days_until_due <= 7
+                
+                bill_reminders.append({
+                    "name": key.title(),
+                    "amount": round(avg_amount, 2),
+                    "usual_day": avg_day,
+                    "days_until_due": days_until_due,
+                    "is_upcoming": is_upcoming,
+                    "message": f"{key.title()} (~{currency_symbol}{avg_amount:,.0f}) is usually due around the {avg_day}{'st' if avg_day == 1 else 'nd' if avg_day == 2 else 'rd' if avg_day == 3 else 'th'}."
+                })
+    
+    # Sort by days until due
+    bill_reminders.sort(key=lambda x: x['days_until_due'])
+    
+    # === 3. DEBT PAYOFF TIMELINE ===
+    # Find all outstanding debts
+    debts = []
+    for t in transactions:
+        if t['type'] in ['credit_payable', 'loan_payable']:
+            remaining = t.get('remaining_amount', t['amount'])
+            if remaining > 0 and t.get('status') != 'settled':
+                debts.append({
+                    'id': t['id'],
+                    'description': t['description'],
+                    'contact': t.get('contact_name', 'Unknown'),
+                    'original_amount': t['amount'],
+                    'remaining': remaining,
+                    'due_date': t.get('due_date')
+                })
+    
+    total_debt = sum(d['remaining'] for d in debts)
+    
+    # Calculate average monthly payment towards debt (from payment_made transactions)
+    payments_90d = sum(
+        t['amount'] for t in recent_transactions 
+        if t['type'] == 'payment_made'
+    )
+    avg_monthly_payment = (payments_90d / 3) if payments_90d > 0 else 0
+    
+    # If no payment history, suggest 10% of income
+    if avg_monthly_payment == 0 and avg_daily_income > 0:
+        avg_monthly_payment = avg_daily_income * 30 * 0.1
+    
+    # Calculate payoff timeline
+    debt_payoff = {
+        "total_debt": round(total_debt, 2),
+        "debt_count": len(debts),
+        "debts": debts[:5],  # Top 5 debts
+        "avg_monthly_payment": round(avg_monthly_payment, 2),
+        "months_to_payoff": None,
+        "payoff_date": None,
+        "message": None
+    }
+    
+    if total_debt > 0 and avg_monthly_payment > 0:
+        months_to_payoff = total_debt / avg_monthly_payment
+        payoff_date = now + timedelta(days=months_to_payoff * 30)
+        
+        debt_payoff["months_to_payoff"] = round(months_to_payoff, 1)
+        debt_payoff["payoff_date"] = payoff_date.strftime("%B %Y")
+        debt_payoff["message"] = f"If you pay {currency_symbol}{avg_monthly_payment:,.0f}/month, you'll be debt-free by {payoff_date.strftime('%B %Y')}."
+    elif total_debt > 0:
+        debt_payoff["message"] = f"You have {currency_symbol}{total_debt:,.0f} in debt. Start making regular payments to track your payoff timeline."
+    else:
+        debt_payoff["message"] = "Great job! You have no outstanding debts."
+    
+    return {
+        "cash_flow_forecast": cash_flow_forecast,
+        "bill_reminders": bill_reminders[:5],  # Top 5 upcoming bills
+        "debt_payoff": debt_payoff,
+        "generated_at": now.isoformat()
+    }

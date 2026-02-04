@@ -9,7 +9,7 @@ from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.contact import Contact
 from app.api.deps import get_current_user
-from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons
+from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons, calculate_smart_predictions
 
 router = APIRouter(prefix="/insights", tags=["Insights"])
 
@@ -75,6 +75,51 @@ class SpendingComparisonsResponse(BaseModel):
     comparisons: list[ComparisonItem]
     percentile: int
     summary: str
+
+
+class CashFlowForecast(BaseModel):
+    current_balance: float
+    projected_end_of_month: float
+    projected_income: float
+    projected_expenses: float
+    days_remaining: int
+    trend: str
+    message: str
+
+
+class BillReminder(BaseModel):
+    name: str
+    amount: float
+    usual_day: int
+    days_until_due: int
+    is_upcoming: bool
+    message: str
+
+
+class DebtItem(BaseModel):
+    id: str
+    description: str
+    contact: str
+    original_amount: float
+    remaining: float
+    due_date: Optional[str] = None
+
+
+class DebtPayoff(BaseModel):
+    total_debt: float
+    debt_count: int
+    debts: list[DebtItem]
+    avg_monthly_payment: float
+    months_to_payoff: Optional[float] = None
+    payoff_date: Optional[str] = None
+    message: Optional[str] = None
+
+
+class SmartPredictionsResponse(BaseModel):
+    cash_flow_forecast: CashFlowForecast
+    bill_reminders: list[BillReminder]
+    debt_payoff: DebtPayoff
+    generated_at: str
 
 
 @router.get("/weekly-summary", response_model=WeeklySummaryResponse)
@@ -270,4 +315,53 @@ async def get_spending_comparisons(
         comparisons=comparisons_data["comparisons"],
         percentile=comparisons_data["percentile"],
         summary=comparisons_data["summary"]
+    )
+
+
+@router.get("/smart-predictions", response_model=SmartPredictionsResponse)
+async def get_smart_predictions(
+    currency_symbol: str = "$",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get smart predictions including:
+    - Cash flow forecast for end of month
+    - Bill reminders based on recurring patterns
+    - Debt payoff timeline
+    """
+    
+    # Fetch all user transactions
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.user_id == current_user.id)
+        .order_by(Transaction.date.desc())
+    )
+    transactions = result.scalars().all()
+    
+    # Convert to dict format
+    tx_data = [
+        {
+            "id": str(tx.id),
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "description": tx.description,
+            "category": tx.category,
+            "type": tx.type.value if tx.type else None,
+            "contact_name": tx.contact_name,
+            "remaining_amount": tx.remaining_amount,
+            "status": tx.status.value if tx.status else None,
+            "due_date": tx.due_date.isoformat() if tx.due_date else None,
+        }
+        for tx in transactions
+    ]
+    
+    # Calculate predictions
+    predictions = calculate_smart_predictions(tx_data, currency_symbol)
+    
+    return SmartPredictionsResponse(
+        cash_flow_forecast=predictions["cash_flow_forecast"],
+        bill_reminders=predictions["bill_reminders"],
+        debt_payoff=predictions["debt_payoff"],
+        generated_at=predictions["generated_at"]
     )
