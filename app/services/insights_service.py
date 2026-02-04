@@ -828,3 +828,183 @@ def calculate_smart_predictions(
         "debt_payoff": debt_payoff,
         "generated_at": now.isoformat()
     }
+
+
+def generate_proactive_nudges(
+    transactions: List[Dict[str, Any]],
+    budgets: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """
+    Generate proactive AI nudges including:
+    1. Morning brief - daily financial snapshot
+    2. Smart alerts - budget warnings, unusual spending
+    3. Celebrations - achievements and milestones
+    """
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=now.weekday())
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    nudges = []
+    
+    # Filter transactions by period
+    this_week_txs = [
+        t for t in transactions
+        if datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= week_start
+    ]
+    this_month_txs = [
+        t for t in transactions
+        if datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= month_start
+    ]
+    
+    # Calculate weekly totals
+    weekly_income = sum(t['amount'] for t in this_week_txs if t['type'] == 'income')
+    weekly_expenses = sum(t['amount'] for t in this_week_txs if t['type'] == 'expense')
+    weekly_balance = weekly_income - weekly_expenses
+    
+    # Calculate monthly totals
+    monthly_income = sum(t['amount'] for t in this_month_txs if t['type'] == 'income')
+    monthly_expenses = sum(t['amount'] for t in this_month_txs if t['type'] == 'expense')
+    
+    # Days left in week/month
+    days_left_week = 7 - now.weekday()
+    days_left_month = 30 - now.day  # Simplified
+    
+    # === 1. MORNING BRIEF ===
+    # Calculate remaining budget for the week
+    avg_daily_expense = monthly_expenses / now.day if now.day > 0 else 0
+    projected_weekly_remaining = weekly_balance - (avg_daily_expense * days_left_week)
+    
+    morning_brief = {
+        "type": "morning_brief",
+        "icon": "sun",
+        "color": "amber",
+        "title": "Good morning!",
+        "message": f"You have {currency_symbol}{max(0, weekly_balance):,.0f} left for the week.",
+        "details": {
+            "weekly_income": weekly_income,
+            "weekly_expenses": weekly_expenses,
+            "weekly_balance": weekly_balance,
+            "days_left": days_left_week
+        }
+    }
+    nudges.append(morning_brief)
+    
+    # === 2. SMART ALERTS ===
+    # Check budget warnings
+    for budget in budgets:
+        if not budget.get('is_active', True):
+            continue
+            
+        progress = budget.get('progress_percent', 0)
+        alert_threshold = budget.get('alert_at_percent', 80)
+        
+        if budget['type'] == 'spending_limit':
+            if progress >= 100:
+                nudges.append({
+                    "type": "alert",
+                    "icon": "exclamation-triangle",
+                    "color": "rose",
+                    "title": "Over Budget!",
+                    "message": f"You've exceeded your {budget['name']} budget by {currency_symbol}{budget['current_amount'] - budget['amount']:,.0f}.",
+                    "priority": "high"
+                })
+            elif progress >= alert_threshold:
+                nudges.append({
+                    "type": "alert",
+                    "icon": "bell",
+                    "color": "amber",
+                    "title": "Budget Warning",
+                    "message": f"You're at {progress:.0f}% of your {budget['name']} budget.",
+                    "priority": "medium"
+                })
+    
+    # Check for unusual spending (50% more than daily average)
+    if avg_daily_expense > 0:
+        today_txs = [
+            t for t in transactions
+            if datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= today_start
+        ]
+        today_expenses = sum(t['amount'] for t in today_txs if t['type'] == 'expense')
+        
+        if today_expenses > avg_daily_expense * 1.5:
+            nudges.append({
+                "type": "alert",
+                "icon": "chart-bar",
+                "color": "orange",
+                "title": "High Spending Today",
+                "message": f"You've spent {currency_symbol}{today_expenses:,.0f} today, which is {(today_expenses/avg_daily_expense - 1)*100:.0f}% more than your daily average.",
+                "priority": "low"
+            })
+    
+    # === 3. CELEBRATIONS ===
+    # Check for recently settled debts
+    recent_settlements = [
+        t for t in transactions
+        if t.get('type') in ['payment_received', 'payment_made']
+        and datetime.fromisoformat(t['date'].replace('Z', '+00:00').replace('+00:00', '')) >= today_start - timedelta(days=1)
+    ]
+    
+    for payment in recent_settlements[:3]:  # Limit to 3 celebrations
+        contact = payment.get('contact_name', 'someone')
+        if payment['type'] == 'payment_received':
+            nudges.append({
+                "type": "celebration",
+                "icon": "party-horn",
+                "color": "emerald",
+                "title": "Payment Received! 🎉",
+                "message": f"You received {currency_symbol}{payment['amount']:,.0f} from {contact}!",
+                "priority": "low"
+            })
+        else:
+            nudges.append({
+                "type": "celebration",
+                "icon": "check-circle",
+                "color": "emerald",
+                "title": "Debt Paid! 🎉",
+                "message": f"You paid {currency_symbol}{payment['amount']:,.0f} to {contact}!",
+                "priority": "low"
+            })
+    
+    # Check for income goals achieved
+    for budget in budgets:
+        if budget['type'] in ['income_goal', 'savings_goal', 'profit_goal']:
+            if budget.get('progress_percent', 0) >= 100:
+                nudges.append({
+                    "type": "celebration",
+                    "icon": "trophy",
+                    "color": "amber",
+                    "title": "Goal Achieved! 🏆",
+                    "message": f"You've reached your {budget['name']} goal of {currency_symbol}{budget['amount']:,.0f}!",
+                    "priority": "high"
+                })
+    
+    # Check savings milestone
+    if monthly_income > 0:
+        savings_rate = (monthly_income - monthly_expenses) / monthly_income
+        if savings_rate >= 0.2:  # 20% savings rate
+            nudges.append({
+                "type": "celebration",
+                "icon": "piggy-bank",
+                "color": "emerald",
+                "title": "Great Savings! 💰",
+                "message": f"You're saving {savings_rate*100:.0f}% of your income this month!",
+                "priority": "low"
+            })
+    
+    # Sort nudges by priority
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    nudges.sort(key=lambda x: priority_order.get(x.get('priority', 'low'), 2))
+    
+    return {
+        "nudges": nudges,
+        "summary": {
+            "weekly_balance": weekly_balance,
+            "monthly_income": monthly_income,
+            "monthly_expenses": monthly_expenses,
+            "days_left_week": days_left_week,
+            "days_left_month": days_left_month
+        },
+        "generated_at": now.isoformat()
+    }

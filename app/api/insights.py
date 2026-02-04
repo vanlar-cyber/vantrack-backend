@@ -9,7 +9,8 @@ from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.contact import Contact
 from app.api.deps import get_current_user
-from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons, calculate_smart_predictions
+from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons, calculate_smart_predictions, generate_proactive_nudges
+from app.models.budget import Budget
 
 router = APIRouter(prefix="/insights", tags=["Insights"])
 
@@ -119,6 +120,37 @@ class SmartPredictionsResponse(BaseModel):
     cash_flow_forecast: CashFlowForecast
     bill_reminders: list[BillReminder]
     debt_payoff: DebtPayoff
+    generated_at: str
+
+
+class NudgeDetails(BaseModel):
+    weekly_income: Optional[float] = None
+    weekly_expenses: Optional[float] = None
+    weekly_balance: Optional[float] = None
+    days_left: Optional[int] = None
+
+
+class Nudge(BaseModel):
+    type: str  # morning_brief, alert, celebration
+    icon: str
+    color: str
+    title: str
+    message: str
+    priority: Optional[str] = None
+    details: Optional[NudgeDetails] = None
+
+
+class NudgeSummary(BaseModel):
+    weekly_balance: float
+    monthly_income: float
+    monthly_expenses: float
+    days_left_week: int
+    days_left_month: int
+
+
+class ProactiveNudgesResponse(BaseModel):
+    nudges: list[Nudge]
+    summary: NudgeSummary
     generated_at: str
 
 
@@ -364,4 +396,75 @@ async def get_smart_predictions(
         bill_reminders=predictions["bill_reminders"],
         debt_payoff=predictions["debt_payoff"],
         generated_at=predictions["generated_at"]
+    )
+
+
+@router.get("/nudges", response_model=ProactiveNudgesResponse)
+async def get_proactive_nudges(
+    currency_symbol: str = "$",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get proactive AI nudges including:
+    - Morning brief with daily financial snapshot
+    - Smart alerts for budget warnings and unusual spending
+    - Celebrations for achievements and milestones
+    """
+    from app.api.budgets import calculate_budget_progress, get_period_start
+    from app.models.budget import BudgetType
+    
+    # Fetch all user transactions
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.user_id == current_user.id)
+        .order_by(Transaction.date.desc())
+    )
+    transactions = result.scalars().all()
+    
+    # Convert to dict format
+    tx_data = [
+        {
+            "id": str(tx.id),
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "description": tx.description,
+            "category": tx.category,
+            "type": tx.type.value if tx.type else None,
+            "contact_name": tx.contact_name,
+        }
+        for tx in transactions
+    ]
+    
+    # Fetch user budgets with progress
+    budget_result = await db.execute(
+        select(Budget)
+        .where(Budget.user_id == current_user.id)
+    )
+    budgets = budget_result.scalars().all()
+    
+    budget_data = []
+    for budget in budgets:
+        current_amount, status = await calculate_budget_progress(db, budget, current_user.id)
+        progress = (current_amount / budget.amount * 100) if budget.amount > 0 else 0
+        
+        budget_data.append({
+            "id": str(budget.id),
+            "name": budget.name,
+            "type": budget.type.value if hasattr(budget.type, 'value') else str(budget.type),
+            "category": budget.category,
+            "amount": budget.amount,
+            "current_amount": current_amount,
+            "progress_percent": progress,
+            "alert_at_percent": budget.alert_at_percent,
+            "is_active": budget.is_active,
+        })
+    
+    # Generate nudges
+    nudges_data = generate_proactive_nudges(tx_data, budget_data, currency_symbol)
+    
+    return ProactiveNudgesResponse(
+        nudges=nudges_data["nudges"],
+        summary=nudges_data["summary"],
+        generated_at=nudges_data["generated_at"]
     )

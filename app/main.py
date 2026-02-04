@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api import auth, users, transactions, contacts, messages, drafts, ai, insights
+from app.api import auth, users, transactions, contacts, messages, drafts, ai, insights, budgets
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -28,6 +28,7 @@ app.include_router(messages.router, prefix=settings.API_V1_STR)
 app.include_router(drafts.router, prefix=settings.API_V1_STR)
 app.include_router(ai.router, prefix=settings.API_V1_STR)
 app.include_router(insights.router, prefix=settings.API_V1_STR)
+app.include_router(budgets.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")
