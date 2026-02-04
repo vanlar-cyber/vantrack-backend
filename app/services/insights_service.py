@@ -535,3 +535,120 @@ Please provide 2-3 specific tips to improve the score, focusing on the lowest-sc
     except Exception as e:
         print(f"[ERROR] Health tips generation failed: {e}")
         return "Keep tracking your finances to get personalized tips!"
+
+
+# Benchmark averages (based on typical spending patterns)
+# These could be replaced with real aggregate data in the future
+SPENDING_BENCHMARKS = {
+    "food": 0.15,           # 15% of income
+    "dining": 0.05,         # 5% of income
+    "transport": 0.10,      # 10% of income
+    "entertainment": 0.05,  # 5% of income
+    "shopping": 0.10,       # 10% of income
+    "utilities": 0.08,      # 8% of income
+    "health": 0.05,         # 5% of income
+    "education": 0.05,      # 5% of income
+    "savings_rate": 0.20,   # 20% savings rate
+    "debt_ratio": 0.30,     # 30% debt-to-income
+}
+
+
+def calculate_spending_comparisons(
+    transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """Compare user's spending to anonymous benchmarks."""
+    
+    today = datetime.now()
+    month_ago = today - timedelta(days=30)
+    
+    # Parse dates and filter to last month
+    def parse_date(tx):
+        tx_date = tx.get('date')
+        if isinstance(tx_date, str):
+            try:
+                return datetime.fromisoformat(tx_date.replace('Z', '+00:00').replace('+00:00', ''))
+            except:
+                return None
+        return tx_date if isinstance(tx_date, datetime) else None
+    
+    last_month_txs = [
+        tx for tx in transactions
+        if (d := parse_date(tx)) and d >= month_ago
+    ]
+    
+    # Calculate monthly income and expenses
+    monthly_income = sum(
+        tx['amount'] for tx in last_month_txs 
+        if tx.get('type') == 'income'
+    )
+    monthly_expenses = sum(
+        tx['amount'] for tx in last_month_txs 
+        if tx.get('type') == 'expense'
+    )
+    
+    # Group expenses by category
+    category_spending: Dict[str, float] = {}
+    for tx in last_month_txs:
+        if tx.get('type') == 'expense':
+            category = (tx.get('category') or 'other').lower()
+            category_spending[category] = category_spending.get(category, 0) + tx['amount']
+    
+    # Calculate comparisons
+    comparisons = []
+    
+    if monthly_income > 0:
+        # Savings rate comparison
+        actual_savings_rate = (monthly_income - monthly_expenses) / monthly_income
+        benchmark_savings = SPENDING_BENCHMARKS['savings_rate']
+        diff_pct = ((actual_savings_rate - benchmark_savings) / benchmark_savings) * 100
+        
+        comparisons.append({
+            "category": "Savings Rate",
+            "your_value": f"{actual_savings_rate * 100:.1f}%",
+            "benchmark": f"{benchmark_savings * 100:.0f}%",
+            "difference": diff_pct,
+            "is_better": actual_savings_rate >= benchmark_savings,
+            "insight": f"You save {abs(diff_pct):.0f}% {'more' if diff_pct > 0 else 'less'} than average"
+        })
+        
+        # Category comparisons
+        for category, benchmark_pct in SPENDING_BENCHMARKS.items():
+            if category in ['savings_rate', 'debt_ratio']:
+                continue
+                
+            # Find matching categories (fuzzy match)
+            actual_spending = 0
+            for cat, amount in category_spending.items():
+                if category in cat or cat in category:
+                    actual_spending += amount
+            
+            if actual_spending > 0 or category in ['food', 'entertainment', 'transport']:
+                actual_pct = actual_spending / monthly_income if monthly_income > 0 else 0
+                diff_pct = ((actual_pct - benchmark_pct) / benchmark_pct) * 100 if benchmark_pct > 0 else 0
+                
+                comparisons.append({
+                    "category": category.title(),
+                    "your_value": f"{currency_symbol}{actual_spending:,.0f}",
+                    "your_pct": f"{actual_pct * 100:.1f}%",
+                    "benchmark": f"{benchmark_pct * 100:.0f}%",
+                    "difference": diff_pct,
+                    "is_better": actual_pct <= benchmark_pct,  # Lower spending is better
+                    "insight": f"You spend {abs(diff_pct):.0f}% {'less' if diff_pct < 0 else 'more'} than average on {category}"
+                })
+    
+    # Sort by absolute difference (most significant first)
+    comparisons.sort(key=lambda x: abs(x['difference']), reverse=True)
+    
+    # Calculate overall ranking (simplified)
+    better_count = sum(1 for c in comparisons if c['is_better'])
+    total_count = len(comparisons) if comparisons else 1
+    percentile = int((better_count / total_count) * 100)
+    
+    return {
+        "monthly_income": monthly_income,
+        "monthly_expenses": monthly_expenses,
+        "comparisons": comparisons[:6],  # Top 6 most significant
+        "percentile": percentile,
+        "summary": f"You're doing better than average in {better_count} of {total_count} categories"
+    }

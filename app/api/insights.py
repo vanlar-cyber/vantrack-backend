@@ -9,7 +9,7 @@ from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.contact import Contact
 from app.api.deps import get_current_user
-from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips
+from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons
 
 router = APIRouter(prefix="/insights", tags=["Insights"])
 
@@ -57,6 +57,24 @@ class HealthScoreResponse(BaseModel):
     breakdown: HealthBreakdown
     summary: HealthSummary
     tips: str
+
+
+class ComparisonItem(BaseModel):
+    category: str
+    your_value: str
+    your_pct: Optional[str] = None
+    benchmark: str
+    difference: float
+    is_better: bool
+    insight: str
+
+
+class SpendingComparisonsResponse(BaseModel):
+    monthly_income: float
+    monthly_expenses: float
+    comparisons: list[ComparisonItem]
+    percentile: int
+    summary: str
 
 
 @router.get("/weekly-summary", response_model=WeeklySummaryResponse)
@@ -211,4 +229,45 @@ async def get_health_score(
         breakdown=health_data["breakdown"],
         summary=health_data["summary"],
         tips=tips
+    )
+
+
+@router.get("/spending-comparisons", response_model=SpendingComparisonsResponse)
+async def get_spending_comparisons(
+    currency_symbol: str = "$",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Compare user's spending to anonymous benchmarks."""
+    
+    # Fetch user's transactions
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.user_id == current_user.id)
+        .order_by(Transaction.date.desc())
+    )
+    transactions = result.scalars().all()
+    
+    # Convert to dict format
+    tx_data = [
+        {
+            "id": str(tx.id),
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "description": tx.description,
+            "category": tx.category,
+            "type": tx.type.value if tx.type else None,
+        }
+        for tx in transactions
+    ]
+    
+    # Calculate comparisons
+    comparisons_data = calculate_spending_comparisons(tx_data, currency_symbol)
+    
+    return SpendingComparisonsResponse(
+        monthly_income=comparisons_data["monthly_income"],
+        monthly_expenses=comparisons_data["monthly_expenses"],
+        comparisons=comparisons_data["comparisons"],
+        percentile=comparisons_data["percentile"],
+        summary=comparisons_data["summary"]
     )
