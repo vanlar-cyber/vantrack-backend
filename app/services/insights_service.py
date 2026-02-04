@@ -295,3 +295,243 @@ Please answer the question based on the data above. Be specific with numbers and
     except Exception as e:
         print(f"[ERROR] Question answering failed: {e}")
         return f"Unable to answer: {str(e)}"
+
+
+HEALTH_SCORE_INSTRUCTION = """
+You are VanTrack AI, a friendly financial health advisor.
+Based on the user's Financial Health Score breakdown, provide 2-3 specific, actionable tips to improve their score.
+
+### YOUR PERSONALITY:
+- Encouraging but honest
+- Focus on the LOWEST scoring areas first
+- Give specific, actionable advice (not generic)
+- Keep it brief - max 3 bullet points
+
+### RESPONSE LANGUAGE:
+CRITICAL: Respond in the SAME language as specified in the user's language_code.
+
+### FORMAT:
+- Use bullet points
+- Each tip should be 1-2 sentences max
+- Focus on quick wins they can do this week
+"""
+
+
+def calculate_health_score(
+    transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """Calculate financial health score (0-100) based on multiple factors."""
+    
+    today = datetime.now()
+    month_ago = today - timedelta(days=30)
+    three_months_ago = today - timedelta(days=90)
+    
+    # Parse dates and filter transactions
+    def parse_date(tx):
+        tx_date = tx.get('date')
+        if isinstance(tx_date, str):
+            try:
+                return datetime.fromisoformat(tx_date.replace('Z', '+00:00').replace('+00:00', ''))
+            except:
+                return None
+        return tx_date if isinstance(tx_date, datetime) else None
+    
+    all_txs = [(tx, parse_date(tx)) for tx in transactions]
+    all_txs = [(tx, d) for tx, d in all_txs if d is not None]
+    
+    last_month = [(tx, d) for tx, d in all_txs if d >= month_ago]
+    last_3_months = [(tx, d) for tx, d in all_txs if d >= three_months_ago]
+    
+    # 1. SAVINGS RATE (0-30 points)
+    # (Income - Expenses) / Income * 100
+    month_income = sum(tx['amount'] for tx, d in last_month if tx.get('type') == 'income')
+    month_expense = sum(tx['amount'] for tx, d in last_month if tx.get('type') == 'expense')
+    
+    if month_income > 0:
+        savings_rate = (month_income - month_expense) / month_income
+        savings_score = min(30, max(0, savings_rate * 100))  # 30% savings = full points
+    else:
+        savings_rate = 0
+        savings_score = 0
+    
+    # 2. DEBT-TO-INCOME RATIO (0-25 points)
+    # Lower is better: <20% = excellent, >50% = poor
+    total_payable = sum(
+        tx.get('remaining_amount', tx['amount'])
+        for tx in transactions
+        if tx.get('type') in ['credit_payable', 'loan_payable']
+        and tx.get('status') != 'settled'
+    )
+    total_receivable = sum(
+        tx.get('remaining_amount', tx['amount'])
+        for tx in transactions
+        if tx.get('type') in ['credit_receivable', 'loan_receivable']
+        and tx.get('status') != 'settled'
+    )
+    
+    avg_monthly_income = month_income if month_income > 0 else 1
+    debt_ratio = total_payable / avg_monthly_income if avg_monthly_income > 0 else 0
+    
+    if debt_ratio <= 0.2:
+        debt_score = 25
+    elif debt_ratio <= 0.5:
+        debt_score = 25 - ((debt_ratio - 0.2) / 0.3) * 15
+    else:
+        debt_score = max(0, 10 - (debt_ratio - 0.5) * 10)
+    
+    # 3. SPENDING CONSISTENCY (0-25 points)
+    # Compare weekly spending variance - lower variance = more consistent
+    weeks_spending = {}
+    for tx, d in last_month:
+        if tx.get('type') == 'expense':
+            week_num = d.isocalendar()[1]
+            weeks_spending[week_num] = weeks_spending.get(week_num, 0) + tx['amount']
+    
+    if len(weeks_spending) >= 2:
+        avg_weekly = sum(weeks_spending.values()) / len(weeks_spending)
+        if avg_weekly > 0:
+            variance = sum((v - avg_weekly) ** 2 for v in weeks_spending.values()) / len(weeks_spending)
+            std_dev = variance ** 0.5
+            cv = std_dev / avg_weekly  # Coefficient of variation
+            consistency_score = max(0, 25 - cv * 25)  # Lower CV = higher score
+        else:
+            consistency_score = 25
+    else:
+        consistency_score = 15  # Not enough data, give average score
+    
+    # 4. EMERGENCY FUND STATUS (0-20 points)
+    # Based on net position (receivables - payables) relative to monthly expenses
+    net_position = total_receivable - total_payable
+    monthly_expenses = month_expense if month_expense > 0 else 1
+    
+    months_covered = net_position / monthly_expenses if monthly_expenses > 0 else 0
+    
+    if months_covered >= 3:
+        emergency_score = 20
+    elif months_covered >= 1:
+        emergency_score = 10 + (months_covered - 1) * 5
+    elif months_covered >= 0:
+        emergency_score = months_covered * 10
+    else:
+        emergency_score = max(0, 5 + months_covered * 5)  # Negative = in debt
+    
+    # TOTAL SCORE
+    total_score = int(savings_score + debt_score + consistency_score + emergency_score)
+    total_score = min(100, max(0, total_score))
+    
+    # Determine grade
+    if total_score >= 80:
+        grade = "Excellent"
+        grade_color = "green"
+    elif total_score >= 60:
+        grade = "Good"
+        grade_color = "blue"
+    elif total_score >= 40:
+        grade = "Fair"
+        grade_color = "yellow"
+    else:
+        grade = "Needs Work"
+        grade_color = "red"
+    
+    return {
+        "score": total_score,
+        "grade": grade,
+        "grade_color": grade_color,
+        "breakdown": {
+            "savings_rate": {
+                "score": round(savings_score, 1),
+                "max": 30,
+                "value": f"{savings_rate * 100:.1f}%",
+                "label": "Savings Rate"
+            },
+            "debt_ratio": {
+                "score": round(debt_score, 1),
+                "max": 25,
+                "value": f"{debt_ratio * 100:.1f}%",
+                "label": "Debt-to-Income"
+            },
+            "consistency": {
+                "score": round(consistency_score, 1),
+                "max": 25,
+                "value": f"{len(weeks_spending)} weeks tracked",
+                "label": "Spending Consistency"
+            },
+            "emergency_fund": {
+                "score": round(emergency_score, 1),
+                "max": 20,
+                "value": f"{months_covered:.1f} months",
+                "label": "Emergency Buffer"
+            }
+        },
+        "summary": {
+            "monthly_income": month_income,
+            "monthly_expense": month_expense,
+            "total_receivable": total_receivable,
+            "total_payable": total_payable,
+            "net_position": net_position
+        }
+    }
+
+
+async def generate_health_tips(
+    health_data: Dict[str, Any],
+    currency_symbol: str = "$",
+    language_code: str = "en"
+) -> str:
+    """Generate AI tips to improve financial health score."""
+    
+    if not settings.GEMINI_API_KEY:
+        return "AI tips unavailable. Please configure GEMINI_API_KEY."
+    
+    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    
+    breakdown = health_data['breakdown']
+    summary = health_data['summary']
+    
+    # Find lowest scoring areas
+    scores = [
+        (breakdown['savings_rate']['label'], breakdown['savings_rate']['score'], breakdown['savings_rate']['max'], breakdown['savings_rate']['value']),
+        (breakdown['debt_ratio']['label'], breakdown['debt_ratio']['score'], breakdown['debt_ratio']['max'], breakdown['debt_ratio']['value']),
+        (breakdown['consistency']['label'], breakdown['consistency']['score'], breakdown['consistency']['max'], breakdown['consistency']['value']),
+        (breakdown['emergency_fund']['label'], breakdown['emergency_fund']['score'], breakdown['emergency_fund']['max'], breakdown['emergency_fund']['value']),
+    ]
+    scores.sort(key=lambda x: x[1] / x[2])  # Sort by percentage of max
+    
+    context = f"""
+## Financial Health Score: {health_data['score']}/100 ({health_data['grade']})
+
+### Score Breakdown (sorted by priority - lowest first):
+"""
+    for label, score, max_score, value in scores:
+        pct = (score / max_score) * 100
+        context += f"- {label}: {score:.1f}/{max_score} ({pct:.0f}%) - Current: {value}\n"
+    
+    context += f"""
+### Financial Summary:
+- Monthly Income: {currency_symbol}{summary['monthly_income']:,.2f}
+- Monthly Expenses: {currency_symbol}{summary['monthly_expense']:,.2f}
+- Others Owe You: {currency_symbol}{summary['total_receivable']:,.2f}
+- You Owe Others: {currency_symbol}{summary['total_payable']:,.2f}
+
+### Language: {language_code}
+
+Please provide 2-3 specific tips to improve the score, focusing on the lowest-scoring areas.
+"""
+    
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=context)])],
+            config=types.GenerateContentConfig(
+                system_instruction=HEALTH_SCORE_INSTRUCTION,
+                temperature=0.5,
+                max_output_tokens=300
+            )
+        )
+        
+        return response.text.strip() if response.text else "Keep tracking your finances to get personalized tips!"
+        
+    except Exception as e:
+        print(f"[ERROR] Health tips generation failed: {e}")
+        return "Keep tracking your finances to get personalized tips!"
