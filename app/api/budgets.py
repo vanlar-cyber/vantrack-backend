@@ -75,7 +75,7 @@ async def calculate_budget_progress(
     period_start = get_period_start(budget.period)
     
     # Build query based on budget type
-    if budget.type == BudgetType.spending_limit:
+    if budget.type == 'spending_limit':
         # Sum expenses in this category
         query = select(Transaction).where(
             and_(
@@ -101,7 +101,7 @@ async def calculate_budget_progress(
         else:
             status = "on_track"
             
-    elif budget.type == BudgetType.income_goal:
+    elif budget.type == 'income_goal':
         # Sum income
         query = select(Transaction).where(
             and_(
@@ -117,7 +117,7 @@ async def calculate_budget_progress(
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         status = "achieved" if progress >= 100 else "on_track"
         
-    elif budget.type == BudgetType.savings_goal:
+    elif budget.type == 'savings_goal':
         # Savings = Income - Expenses
         income_query = select(Transaction).where(
             and_(
@@ -144,7 +144,7 @@ async def calculate_budget_progress(
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         status = "achieved" if progress >= 100 else "on_track"
         
-    elif budget.type == BudgetType.profit_goal:
+    elif budget.type == 'profit_goal':
         # Profit = Income - Expenses (can be negative)
         income_query = select(Transaction).where(
             and_(
@@ -206,7 +206,7 @@ async def get_budgets(
             progress_percent=round(progress, 1),
             alert_at_percent=budget.alert_at_percent,
             is_active=budget.is_active,
-            is_over_budget=progress >= 100 and budget.type == BudgetType.spending_limit,
+            is_over_budget=progress >= 100 and budget.type == 'spending_limit',
             status=status,
             period_start=get_period_start(budget.period.value if hasattr(budget.period, 'value') else str(budget.period)).isoformat(),
             created_at=budget.created_at.isoformat()
@@ -223,30 +223,28 @@ async def create_budget(
 ):
     """Create a new budget or goal."""
     # Validate type
-    try:
-        budget_type = BudgetType(budget_data.type)
-    except ValueError:
+    valid_types = ['spending_limit', 'income_goal', 'savings_goal', 'profit_goal']
+    if budget_data.type not in valid_types:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid budget type. Must be one of: {[t.value for t in BudgetType]}"
+            detail=f"Invalid budget type. Must be one of: {valid_types}"
         )
     
     # Validate period
-    try:
-        budget_period = BudgetPeriod(budget_data.period)
-    except ValueError:
+    valid_periods = ['weekly', 'monthly', 'yearly']
+    if budget_data.period not in valid_periods:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid period. Must be one of: {[p.value for p in BudgetPeriod]}"
+            detail=f"Invalid period. Must be one of: {valid_periods}"
         )
     
     budget = Budget(
         user_id=current_user.id,
         name=budget_data.name,
-        type=budget_type,
+        type=budget_data.type,
         category=budget_data.category,
         amount=budget_data.amount,
-        period=budget_period,
+        period=budget_data.period,
         alert_at_percent=budget_data.alert_at_percent,
         period_start=get_period_start(budget_data.period)
     )
@@ -261,15 +259,15 @@ async def create_budget(
     return BudgetResponse(
         id=str(budget.id),
         name=budget.name,
-        type=budget.type.value,
+        type=budget.type,
         category=budget.category,
         amount=budget.amount,
-        period=budget.period.value,
+        period=budget.period,
         current_amount=round(current_amount, 2),
         progress_percent=round(progress, 1),
         alert_at_percent=budget.alert_at_percent,
         is_active=budget.is_active,
-        is_over_budget=progress >= 100 and budget.type == BudgetType.spending_limit,
+        is_over_budget=progress >= 100 and budget.type == 'spending_limit',
         status=budget_status,
         period_start=budget.period_start.isoformat() if budget.period_start else None,
         created_at=budget.created_at.isoformat()
@@ -304,11 +302,11 @@ async def update_budget(
     if budget_data.category is not None:
         budget.category = budget_data.category
     if budget_data.period is not None:
-        try:
-            budget.period = BudgetPeriod(budget_data.period)
-            budget.period_start = get_period_start(budget_data.period)
-        except ValueError:
+        valid_periods = ['weekly', 'monthly', 'yearly']
+        if budget_data.period not in valid_periods:
             raise HTTPException(status_code=400, detail="Invalid period")
+        budget.period = budget_data.period
+        budget.period_start = get_period_start(budget_data.period)
     if budget_data.alert_at_percent is not None:
         budget.alert_at_percent = budget_data.alert_at_percent
     if budget_data.is_active is not None:
@@ -323,15 +321,15 @@ async def update_budget(
     return BudgetResponse(
         id=str(budget.id),
         name=budget.name,
-        type=budget.type.value if hasattr(budget.type, 'value') else str(budget.type),
+        type=budget.type,
         category=budget.category,
         amount=budget.amount,
-        period=budget.period.value if hasattr(budget.period, 'value') else str(budget.period),
+        period=budget.period,
         current_amount=round(current_amount, 2),
         progress_percent=round(progress, 1),
         alert_at_percent=budget.alert_at_percent,
         is_active=budget.is_active,
-        is_over_budget=progress >= 100 and budget.type == BudgetType.spending_limit,
+        is_over_budget=progress >= 100 and budget.type == 'spending_limit',
         status=budget_status,
         period_start=budget.period_start.isoformat() if budget.period_start else None,
         created_at=budget.created_at.isoformat()

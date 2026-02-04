@@ -28,11 +28,11 @@ class Budget(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     
     name = Column(String(255), nullable=False)  # e.g., "Food Budget", "Monthly Savings"
-    type = Column(Enum(BudgetType), nullable=False)
+    type = Column(String(50), nullable=False)  # spending_limit, income_goal, savings_goal, profit_goal
     category = Column(String(100), nullable=True)  # For spending limits, e.g., "food", "entertainment"
     
     amount = Column(Float, nullable=False)  # Target/limit amount
-    period = Column(Enum(BudgetPeriod), default=BudgetPeriod.monthly)
+    period = Column(String(20), default="monthly")  # weekly, monthly, yearly
     
     # Track progress
     current_amount = Column(Float, default=0)  # Current spent/earned this period
