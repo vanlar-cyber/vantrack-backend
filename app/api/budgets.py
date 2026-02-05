@@ -33,6 +33,14 @@ class BudgetUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class TransactionSummary(BaseModel):
+    id: str
+    description: str
+    amount: float
+    date: str
+    category: Optional[str]
+
+
 class BudgetResponse(BaseModel):
     id: str
     name: str
@@ -48,6 +56,7 @@ class BudgetResponse(BaseModel):
     status: str  # on_track, warning, over_budget, achieved
     period_start: Optional[str]
     created_at: str
+    transactions: List[TransactionSummary] = []  # Transactions counted in this budget
 
     class Config:
         from_attributes = True
@@ -69,10 +78,12 @@ def get_period_start(period: str) -> datetime:
 async def calculate_budget_progress(
     db: AsyncSession,
     budget: Budget,
-    user_id: UUID
-) -> tuple[float, str]:
+    user_id: UUID,
+    include_transactions: bool = False
+) -> tuple[float, str, list]:
     """Calculate current progress for a budget based on transactions."""
     period_start = get_period_start(budget.period)
+    counted_transactions = []
     
     # Build query based on budget type
     if budget.type == 'spending_limit':
@@ -92,6 +103,8 @@ async def calculate_budget_progress(
         result = await db.execute(query)
         transactions = result.scalars().all()
         current = sum(t.amount for t in transactions)
+        if include_transactions:
+            counted_transactions = transactions
         
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         if progress >= 100:
@@ -113,6 +126,8 @@ async def calculate_budget_progress(
         result = await db.execute(query)
         transactions = result.scalars().all()
         current = sum(t.amount for t in transactions)
+        if include_transactions:
+            counted_transactions = transactions
         
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         status = "achieved" if progress >= 100 else "on_track"
@@ -137,9 +152,13 @@ async def calculate_budget_progress(
         income_result = await db.execute(income_query)
         expense_result = await db.execute(expense_query)
         
-        total_income = sum(t.amount for t in income_result.scalars().all())
-        total_expense = sum(t.amount for t in expense_result.scalars().all())
+        income_txs = income_result.scalars().all()
+        expense_txs = expense_result.scalars().all()
+        total_income = sum(t.amount for t in income_txs)
+        total_expense = sum(t.amount for t in expense_txs)
         current = max(0, total_income - total_expense)
+        if include_transactions:
+            counted_transactions = list(income_txs) + list(expense_txs)
         
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         status = "achieved" if progress >= 100 else "on_track"
@@ -164,9 +183,13 @@ async def calculate_budget_progress(
         income_result = await db.execute(income_query)
         expense_result = await db.execute(expense_query)
         
-        total_income = sum(t.amount for t in income_result.scalars().all())
-        total_expense = sum(t.amount for t in expense_result.scalars().all())
+        income_txs = income_result.scalars().all()
+        expense_txs = expense_result.scalars().all()
+        total_income = sum(t.amount for t in income_txs)
+        total_expense = sum(t.amount for t in expense_txs)
         current = total_income - total_expense
+        if include_transactions:
+            counted_transactions = list(income_txs) + list(expense_txs)
         
         progress = (current / budget.amount * 100) if budget.amount > 0 else 0
         status = "achieved" if progress >= 100 else "on_track"
@@ -174,7 +197,7 @@ async def calculate_budget_progress(
         current = 0
         status = "on_track"
     
-    return current, status
+    return current, status, counted_transactions
 
 
 @router.get("", response_model=List[BudgetResponse])
@@ -192,8 +215,18 @@ async def get_budgets(
     
     response = []
     for budget in budgets:
-        current_amount, status = await calculate_budget_progress(db, budget, current_user.id)
+        current_amount, status, txs = await calculate_budget_progress(db, budget, current_user.id, include_transactions=True)
         progress = (current_amount / budget.amount * 100) if budget.amount > 0 else 0
+        
+        tx_summaries = [
+            TransactionSummary(
+                id=str(t.id),
+                description=t.description or '',
+                amount=t.amount,
+                date=t.date.isoformat() if t.date else '',
+                category=t.category
+            ) for t in txs
+        ]
         
         response.append(BudgetResponse(
             id=str(budget.id),
@@ -209,7 +242,8 @@ async def get_budgets(
             is_over_budget=progress >= 100 and budget.type == 'spending_limit',
             status=status,
             period_start=get_period_start(budget.period.value if hasattr(budget.period, 'value') else str(budget.period)).isoformat(),
-            created_at=budget.created_at.isoformat()
+            created_at=budget.created_at.isoformat(),
+            transactions=tx_summaries
         ))
     
     return response
@@ -253,8 +287,18 @@ async def create_budget(
     await db.commit()
     await db.refresh(budget)
     
-    current_amount, budget_status = await calculate_budget_progress(db, budget, current_user.id)
+    current_amount, budget_status, txs = await calculate_budget_progress(db, budget, current_user.id, include_transactions=True)
     progress = (current_amount / budget.amount * 100) if budget.amount > 0 else 0
+    
+    tx_summaries = [
+        TransactionSummary(
+            id=str(t.id),
+            description=t.description or '',
+            amount=t.amount,
+            date=t.date.isoformat() if t.date else '',
+            category=t.category
+        ) for t in txs
+    ]
     
     return BudgetResponse(
         id=str(budget.id),
@@ -270,7 +314,8 @@ async def create_budget(
         is_over_budget=progress >= 100 and budget.type == 'spending_limit',
         status=budget_status,
         period_start=budget.period_start.isoformat() if budget.period_start else None,
-        created_at=budget.created_at.isoformat()
+        created_at=budget.created_at.isoformat(),
+        transactions=tx_summaries
     )
 
 
@@ -315,8 +360,18 @@ async def update_budget(
     await db.commit()
     await db.refresh(budget)
     
-    current_amount, budget_status = await calculate_budget_progress(db, budget, current_user.id)
+    current_amount, budget_status, txs = await calculate_budget_progress(db, budget, current_user.id, include_transactions=True)
     progress = (current_amount / budget.amount * 100) if budget.amount > 0 else 0
+    
+    tx_summaries = [
+        TransactionSummary(
+            id=str(t.id),
+            description=t.description or '',
+            amount=t.amount,
+            date=t.date.isoformat() if t.date else '',
+            category=t.category
+        ) for t in txs
+    ]
     
     return BudgetResponse(
         id=str(budget.id),
@@ -332,7 +387,8 @@ async def update_budget(
         is_over_budget=progress >= 100 and budget.type == 'spending_limit',
         status=budget_status,
         period_start=budget.period_start.isoformat() if budget.period_start else None,
-        created_at=budget.created_at.isoformat()
+        created_at=budget.created_at.isoformat(),
+        transactions=tx_summaries
     )
 
 
