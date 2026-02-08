@@ -197,14 +197,18 @@ async def parse_financial_input(
         
         # Add attachments if any
         if attachments:
+            import base64
             for att in attachments:
                 if att.get("type") not in ["image", "audio"]:
                     continue
                 data_url = att.get("data_url", "")
-                data = data_url.split(",")[1] if "," in data_url else data_url
-                if data:
+                # Extract base64 data from data URL
+                base64_data = data_url.split(",")[1] if "," in data_url else data_url
+                if base64_data:
+                    # Decode base64 to actual binary bytes
+                    decoded_bytes = base64.b64decode(base64_data)
                     user_parts.append(types.Part.from_bytes(
-                        data=bytes(data, 'utf-8'),
+                        data=decoded_bytes,
                         mime_type=att.get("mime_type", "image/png")
                     ))
         
@@ -279,10 +283,10 @@ async def parse_financial_input(
         text = response.text.strip() if response.text else ""
         if not text:
             raise ValueError("Empty response from AI")
-        print("Ai response: ", text)
+        # print("Ai response: ", text)
         
         parsed = json.loads(text)
-        print(f"[DEBUG] AI Response: {parsed}")  # Debug log
+        # print(f"[DEBUG] AI Response: {parsed}")  # Debug log
         return parsed
     
     try:

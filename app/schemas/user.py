@@ -22,6 +22,15 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     preferred_currency: Optional[str] = None
     preferred_language: Optional[str] = None
+    # Business profile fields
+    business_name: Optional[str] = None
+    business_type: Optional[str] = None
+    industry: Optional[str] = None
+    business_size: Optional[str] = None
+    location: Optional[str] = None
+    phone: Optional[str] = None
+    years_in_business: Optional[int] = None
+    monthly_revenue_range: Optional[str] = None
 
 
 class UserResponse(UserBase):
@@ -30,6 +39,15 @@ class UserResponse(UserBase):
     preferred_currency: str
     preferred_language: str
     created_at: datetime
+    # Business profile fields
+    business_name: Optional[str] = None
+    business_type: Optional[str] = None
+    industry: Optional[str] = None
+    business_size: Optional[str] = None
+    location: Optional[str] = None
+    phone: Optional[str] = None
+    years_in_business: Optional[int] = None
+    monthly_revenue_range: Optional[str] = None
 
     class Config:
         from_attributes = True

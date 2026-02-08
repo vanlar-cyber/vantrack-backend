@@ -830,6 +830,434 @@ def calculate_smart_predictions(
     }
 
 
+ACTION_NUGGETS_SYSTEM_INSTRUCTION = """
+You are Bizzy, an AI business co-founder for small business owners.
+Analyze the user's financial data AND business profile to generate 3-5 prioritized action nuggets for their Daily Decision Feed.
+
+### YOUR ROLE:
+You're not just reporting numbers - you're a strategic advisor who:
+1. Identifies the MOST IMPORTANT things the business owner should focus on TODAY
+2. Provides industry-specific advice based on their business type
+3. Occasionally shares relevant business tips or market insights
+4. Encourages users to complete their profile for better personalized advice
+
+### NUGGET TYPES (mix these based on what's most relevant):
+1. **Financial Actions** - Cash flow, collections, payments, trends
+2. **Transaction Logging Reminders** - IMPORTANT: Encourage users to log their daily transactions (sales, expenses)
+3. **Cash Update Reminders** - IMPORTANT: Remind users to update their cash balance regularly for accurate tracking
+4. **Business Tips** - Industry-specific advice, seasonal tips, best practices
+5. **Profile Nudges** - Encourage completing profile for better insights (if profile is incomplete)
+6. **Market Context** - Relevant business news or trends for their industry
+
+### NUGGET STRUCTURE (return as JSON array):
+Each nugget must have:
+- "icon": FontAwesome icon name (e.g., "fa-triangle-exclamation", "fa-chart-line", "fa-clock", "fa-hand-holding-dollar", "fa-lightbulb", "fa-user-pen", "fa-newspaper", "fa-store")
+- "label": Short title (3-5 words max)
+- "value": Key metric, tip summary, or call-to-action
+- "color": Tailwind gradient:
+  - "from-rose-500 to-red-600" for warnings/urgent
+  - "from-emerald-500 to-green-600" for positive/success
+  - "from-amber-500 to-orange-600" for attention needed
+  - "from-blue-500 to-indigo-600" for info/tips
+  - "from-violet-500 to-purple-600" for insights
+  - "from-cyan-500 to-teal-600" for profile/setup
+- "prompt": A question the user can ask you for deeper analysis (first person)
+- "whyItMatters": One sentence explaining business impact
+- "ifYouDoThis": One sentence with specific action and expected outcome
+- "actionView": Where to navigate:
+  - "assistant" for logging transactions via Bizzy chat (use with "Log Now", "Record Transaction")
+  - "history" for viewing transactions, sales, expenses, cash flow (use with "View Transactions", "View Sales", "View Expenses")
+  - "ledger" ONLY for credit/loan management, debts owed TO you or BY you (use with "View Debts", "View Loans")
+  - "insights" for analytics and reports (use with "Learn More", "View Insights")
+  - "home" for profile settings or cash updates (use with "Complete Profile", "Update Profile", "Update Cash")
+- "actionLabel": Button text matching the actionView
+
+### PRIORITIZATION:
+1. Cash flow emergencies (always first if present)
+2. Money collection opportunities
+3. Upcoming payment obligations
+4. **Transaction logging reminder** - If no transactions logged today, encourage logging
+5. **Cash balance update** - If cash hasn't been updated recently, remind to update
+6. Revenue/profit trends
+7. Industry-specific tips (based on business type)
+8. Profile completion nudges (if missing key info like industry, business size)
+
+### PROFILE COMPLETION NUDGES:
+If the user's profile is incomplete (missing business_name, industry, business_type, etc.), include ONE nudge encouraging them to complete it. Examples:
+- "Complete your profile" - "Get personalized advice"
+- "Tell us your industry" - "Unlock tailored insights"
+
+### BUSINESS TIPS:
+Based on the user's industry and business type, occasionally include relevant tips:
+- Retail: inventory management, seasonal planning, customer retention
+- Food & Beverage: food cost control, peak hours optimization, supplier negotiation
+- Services: pricing strategies, client retention, upselling
+- General: cash flow management, tax planning, growth strategies
+
+### RULES:
+- Be specific with numbers (use the provided currency symbol)
+- Focus on ACTIONABLE insights, not just observations
+- Make "whyItMatters" emotionally compelling but professional
+- Make "ifYouDoThis" concrete and achievable TODAY
+- Personalize advice based on business profile when available
+- Return ONLY valid JSON array, no markdown or explanation
+- Include at most ONE profile nudge or business tip per response
+
+### TRANSACTION LOGGING & CASH UPDATE NUDGES:
+These are IMPORTANT for user engagement. Include them when appropriate:
+- If no transactions logged today: Encourage logging today's sales/expenses
+- If cash balance seems stale: Remind to update cash for accurate tracking
+
+Examples:
+- "Log today's sales" - "Keep your records fresh"
+- "Update your cash" - "Sync your actual cash balance"
+- "Record expenses" - "Don't miss any deductions"
+
+### EXAMPLE OUTPUT:
+[
+  {
+    "icon": "fa-clock",
+    "label": "Overdue collections",
+    "value": "$5,000 past due",
+    "color": "from-amber-500 to-orange-600",
+    "prompt": "I have $5,000 in overdue payments from 3 customers. What's the best way to collect without damaging relationships?",
+    "whyItMatters": "This is your money sitting in someone else's pocket.",
+    "ifYouDoThis": "Send a friendly reminder today - even collecting 50% improves your cash position.",
+    "actionView": "ledger",
+    "actionLabel": "View Debts"
+  },
+  {
+    "icon": "fa-pen-to-square",
+    "label": "Log today's transactions",
+    "value": "No entries yet today",
+    "color": "from-cyan-500 to-teal-600",
+    "prompt": "Help me log my transactions for today",
+    "whyItMatters": "Daily logging gives you accurate insights and prevents forgotten entries.",
+    "ifYouDoThis": "Take 2 minutes now to record today's sales and expenses."
+  },
+  {
+    "icon": "fa-wallet",
+    "label": "Update cash balance",
+    "value": "Keep it accurate",
+    "color": "from-emerald-500 to-green-600",
+    "prompt": "I want to update my current cash on hand",
+    "whyItMatters": "Accurate cash tracking helps you make better spending decisions.",
+    "ifYouDoThis": "Count your cash drawer and update the balance - takes 1 minute.",
+    "actionView": "home",
+    "actionLabel": "Update Cash"
+  },
+  {
+    "icon": "fa-lightbulb",
+    "label": "Retail tip",
+    "value": "Review slow-moving inventory",
+    "color": "from-blue-500 to-indigo-600",
+    "prompt": "What strategies can I use to move slow-selling inventory without heavy discounting?",
+    "whyItMatters": "Dead stock ties up cash that could be working for you.",
+    "ifYouDoThis": "Bundle slow items with bestsellers or run a flash sale this week.",
+    "actionView": "insights",
+    "actionLabel": "Learn More"
+  }
+]
+"""
+
+
+async def generate_action_nuggets_ai(
+    transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$",
+    user_profile: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Generate AI-powered action nuggets for the Daily Decision Feed.
+    Uses Gemini to analyze transaction data and user profile to provide strategic insights.
+    
+    Args:
+        transactions: List of user transactions
+        currency_symbol: Currency symbol for formatting
+        user_profile: User's business profile info (name, industry, business_type, etc.)
+    """
+    if not settings.GEMINI_API_KEY:
+        # Fallback to rule-based if no API key
+        return generate_action_nuggets_fallback(transactions, currency_symbol, user_profile)
+    
+    now = datetime.utcnow()
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_of_last_month = (start_of_month - timedelta(days=1)).replace(day=1)
+    
+    def parse_date(tx):
+        tx_date = tx.get('date')
+        if isinstance(tx_date, str):
+            try:
+                return datetime.fromisoformat(tx_date.replace('Z', '+00:00').replace('+00:00', ''))
+            except:
+                return None
+        return tx_date if isinstance(tx_date, datetime) else None
+    
+    # Prepare financial summary for AI
+    this_month_txs = [tx for tx in transactions if (d := parse_date(tx)) and d >= start_of_month]
+    last_month_txs = [tx for tx in transactions if (d := parse_date(tx)) and start_of_last_month <= d < start_of_month]
+    
+    this_month_income = sum(tx['amount'] for tx in this_month_txs if tx.get('type') == 'income' and tx.get('category') != 'initial_balance')
+    this_month_expenses = sum(tx['amount'] for tx in this_month_txs if tx.get('type') == 'expense')
+    last_month_income = sum(tx['amount'] for tx in last_month_txs if tx.get('type') == 'income' and tx.get('category') != 'initial_balance')
+    last_month_expenses = sum(tx['amount'] for tx in last_month_txs if tx.get('type') == 'expense')
+    
+    # Receivables & Payables
+    receivables = [tx for tx in transactions if tx.get('type') in ['credit_receivable', 'loan_receivable'] and tx.get('status') != 'settled']
+    total_receivables = sum(tx.get('remaining_amount', tx['amount']) for tx in receivables)
+    overdue_receivables = [tx for tx in receivables if tx.get('due_date') and parse_date({'date': tx['due_date']}) and parse_date({'date': tx['due_date']}) < now]
+    overdue_amount = sum(tx.get('remaining_amount', tx['amount']) for tx in overdue_receivables)
+    
+    payables = [tx for tx in transactions if tx.get('type') in ['credit_payable', 'loan_payable'] and tx.get('status') != 'settled']
+    total_payables = sum(tx.get('remaining_amount', tx['amount']) for tx in payables)
+    upcoming_payables = [tx for tx in payables if tx.get('due_date') and (due := parse_date({'date': tx['due_date']})) and now < due <= now + timedelta(days=7)]
+    upcoming_due_amount = sum(tx.get('remaining_amount', tx['amount']) for tx in upcoming_payables)
+    
+    # Category breakdown
+    category_spending = {}
+    for tx in this_month_txs:
+        if tx.get('type') == 'expense' and tx.get('category'):
+            category_spending[tx['category']] = category_spending.get(tx['category'], 0) + tx['amount']
+    top_categories = sorted(category_spending.items(), key=lambda x: -x[1])[:5]
+    
+    # Build user profile context
+    profile = user_profile or {}
+    profile_fields = {
+        'business_name': profile.get('business_name'),
+        'business_type': profile.get('business_type'),
+        'industry': profile.get('industry'),
+        'business_size': profile.get('business_size'),
+        'location': profile.get('location'),
+        'years_in_business': profile.get('years_in_business'),
+        'monthly_revenue_range': profile.get('monthly_revenue_range'),
+    }
+    
+    # Check profile completeness
+    filled_fields = [k for k, v in profile_fields.items() if v]
+    missing_fields = [k for k, v in profile_fields.items() if not v]
+    profile_completeness = len(filled_fields) / len(profile_fields) * 100 if profile_fields else 0
+    
+    profile_context = f"""
+USER BUSINESS PROFILE:
+- Name: {profile.get('full_name', 'Not provided')}
+- Business Name: {profile_fields['business_name'] or 'Not provided'}
+- Business Type: {profile_fields['business_type'] or 'Not provided'}
+- Industry: {profile_fields['industry'] or 'Not provided'}
+- Business Size: {profile_fields['business_size'] or 'Not provided'}
+- Location: {profile_fields['location'] or 'Not provided'}
+- Years in Business: {profile_fields['years_in_business'] or 'Not provided'}
+- Monthly Revenue Range: {profile_fields['monthly_revenue_range'] or 'Not provided'}
+
+PROFILE COMPLETENESS: {profile_completeness:.0f}%
+MISSING FIELDS: {', '.join(missing_fields) if missing_fields else 'None - profile complete!'}
+"""
+
+    # Build context for AI
+    financial_context = f"""
+{profile_context}
+
+FINANCIAL DATA SUMMARY (Currency: {currency_symbol})
+Today: {now.strftime('%Y-%m-%d')}
+Day of month: {now.day}
+
+THIS MONTH:
+- Income: {currency_symbol}{this_month_income:,.0f}
+- Expenses: {currency_symbol}{this_month_expenses:,.0f}
+- Net: {currency_symbol}{(this_month_income - this_month_expenses):,.0f}
+
+LAST MONTH:
+- Income: {currency_symbol}{last_month_income:,.0f}
+- Expenses: {currency_symbol}{last_month_expenses:,.0f}
+
+RECEIVABLES (money owed TO the business):
+- Total outstanding: {currency_symbol}{total_receivables:,.0f}
+- Overdue amount: {currency_symbol}{overdue_amount:,.0f} ({len(overdue_receivables)} customers)
+
+PAYABLES (money the business OWES):
+- Total outstanding: {currency_symbol}{total_payables:,.0f}
+- Due this week: {currency_symbol}{upcoming_due_amount:,.0f} ({len(upcoming_payables)} payments)
+
+TOP EXPENSE CATEGORIES THIS MONTH:
+{chr(10).join([f'- {cat}: {currency_symbol}{amt:,.0f}' for cat, amt in top_categories]) if top_categories else '- No expenses recorded'}
+
+RECENT TRANSACTIONS (last 10):
+{chr(10).join([f"- {tx.get('date', 'N/A')[:10]}: {tx.get('type', 'unknown')} {currency_symbol}{tx.get('amount', 0):,.0f} - {tx.get('description', 'No description')}" for tx in transactions[:10]])}
+"""
+
+    try:
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        
+        response = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=financial_context,
+            config=types.GenerateContentConfig(
+                system_instruction=ACTION_NUGGETS_SYSTEM_INSTRUCTION,
+                temperature=0.7,
+                max_output_tokens=2000,
+            )
+        )
+        
+        response_text = response.text.strip()
+        
+        # Clean up response - remove markdown code blocks if present
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        
+        nuggets = json.loads(response_text)
+        
+        # Validate and sanitize nuggets
+        valid_nuggets = []
+        for nugget in nuggets[:5]:
+            if all(key in nugget for key in ['icon', 'label', 'value', 'color', 'prompt', 'whyItMatters', 'ifYouDoThis']):
+                # Ensure actionView and actionLabel have defaults
+                nugget.setdefault('actionView', 'history')
+                nugget.setdefault('actionLabel', 'View Details')
+                valid_nuggets.append(nugget)
+        
+        # print(" nuggets:", nuggets)
+        
+        return valid_nuggets if valid_nuggets else generate_action_nuggets_fallback(transactions, currency_symbol, user_profile)
+        
+    except Exception as e:
+        print(f"AI nugget generation failed: {e}")
+        return generate_action_nuggets_fallback(transactions, currency_symbol, user_profile)
+
+
+def generate_action_nuggets_fallback(
+    transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$",
+    user_profile: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Fallback rule-based action nuggets when AI is unavailable.
+    """
+    now = datetime.utcnow()
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_of_last_month = (start_of_month - timedelta(days=1)).replace(day=1)
+    day_of_month = now.day
+    days_in_month = 30
+    
+    nuggets = []
+    
+    def parse_date(tx):
+        tx_date = tx.get('date')
+        if isinstance(tx_date, str):
+            try:
+                return datetime.fromisoformat(tx_date.replace('Z', '+00:00').replace('+00:00', ''))
+            except:
+                return None
+        return tx_date if isinstance(tx_date, datetime) else None
+    
+    this_month_txs = [tx for tx in transactions if (d := parse_date(tx)) and d >= start_of_month]
+    last_month_txs = [tx for tx in transactions if (d := parse_date(tx)) and start_of_last_month <= d < start_of_month]
+    
+    this_month_income = sum(tx['amount'] for tx in this_month_txs if tx.get('type') == 'income' and tx.get('category') != 'initial_balance')
+    this_month_expenses = sum(tx['amount'] for tx in this_month_txs if tx.get('type') == 'expense')
+    last_month_income = sum(tx['amount'] for tx in last_month_txs if tx.get('type') == 'income' and tx.get('category') != 'initial_balance')
+    
+    receivables = [tx for tx in transactions if tx.get('type') in ['credit_receivable', 'loan_receivable'] and tx.get('status') != 'settled']
+    total_receivables = sum(tx.get('remaining_amount', tx['amount']) for tx in receivables)
+    overdue_receivables = [tx for tx in receivables if tx.get('due_date') and parse_date({'date': tx['due_date']}) and parse_date({'date': tx['due_date']}) < now]
+    overdue_amount = sum(tx.get('remaining_amount', tx['amount']) for tx in overdue_receivables)
+    
+    payables = [tx for tx in transactions if tx.get('type') in ['credit_payable', 'loan_payable'] and tx.get('status') != 'settled']
+    total_payables = sum(tx.get('remaining_amount', tx['amount']) for tx in payables)
+    
+    # Cash flow
+    net_cash_flow = this_month_income - this_month_expenses
+    if net_cash_flow < 0 and abs(net_cash_flow) > this_month_income * 0.1:
+        nuggets.append({
+            "icon": "fa-triangle-exclamation",
+            "label": "Cash flow negative",
+            "value": f"{currency_symbol}{abs(net_cash_flow):,.0f} deficit",
+            "color": "from-rose-500 to-red-600",
+            "prompt": f"My business is spending {currency_symbol}{abs(net_cash_flow):,.0f} more than earning. What should I do?",
+            "whyItMatters": "You're burning cash faster than you're making it.",
+            "ifYouDoThis": "Cut non-essential expenses or boost sales to turn positive.",
+            "actionView": "history",
+            "actionLabel": "View Transactions"
+        })
+    elif net_cash_flow > 0 and this_month_income > 0:
+        profit_margin = round((net_cash_flow / this_month_income) * 100)
+        if profit_margin >= 20:
+            nuggets.append({
+                "icon": "fa-chart-line",
+                "label": "Strong profit margin",
+                "value": f"{profit_margin}% this month",
+                "color": "from-emerald-500 to-green-600",
+                "prompt": f"My profit margin is {profit_margin}%. How can I reinvest wisely?",
+                "whyItMatters": f"A {profit_margin}% margin is excellent for reinvestment.",
+                "ifYouDoThis": "Reinvest in inventory, marketing, or save for slow months.",
+                "actionView": "history",
+                "actionLabel": "View Transactions"
+            })
+    
+    # Overdue collections
+    if overdue_amount > 0:
+        nuggets.append({
+            "icon": "fa-clock",
+            "label": "Overdue collections",
+            "value": f"{currency_symbol}{overdue_amount:,.0f} past due",
+            "color": "from-amber-500 to-orange-600",
+            "prompt": f"I have {currency_symbol}{overdue_amount:,.0f} in overdue payments. How should I collect?",
+            "whyItMatters": "This is your money sitting in someone else's pocket.",
+            "ifYouDoThis": "Send a friendly reminder today to boost your cash position.",
+            "actionView": "ledger",
+            "actionLabel": "View Debts"
+        })
+    
+    # Revenue trend
+    if last_month_income > 0 and day_of_month >= 7:
+        projected_income = (this_month_income / day_of_month) * days_in_month
+        growth_rate = round(((projected_income - last_month_income) / last_month_income) * 100)
+        if abs(growth_rate) >= 15:
+            nuggets.append({
+                "icon": "fa-arrow-trend-up" if growth_rate > 0 else "fa-arrow-trend-down",
+                "label": "Revenue " + ("growing" if growth_rate > 0 else "declining"),
+                "value": f"{'+' if growth_rate > 0 else ''}{growth_rate}% vs last month",
+                "color": "from-emerald-500 to-teal-600" if growth_rate > 0 else "from-rose-500 to-pink-600",
+                "prompt": f"My revenue is {'up' if growth_rate > 0 else 'down'} {abs(growth_rate)}%. What should I do?",
+                "whyItMatters": "Revenue trends signal business health.",
+                "ifYouDoThis": "Double down on what's working." if growth_rate > 0 else "Review what changed.",
+                "actionView": "history",
+                "actionLabel": "View Sales"
+            })
+    
+    # Working capital
+    if total_receivables > 0 or total_payables > 0:
+        if total_payables > 0 and (total_receivables / total_payables) < 0.8:
+            nuggets.append({
+                "icon": "fa-scale-unbalanced",
+                "label": "Debt exceeds receivables",
+                "value": f"{currency_symbol}{(total_payables - total_receivables):,.0f} gap",
+                "color": "from-rose-500 to-red-600",
+                "prompt": f"I owe more than what's owed to me. How should I prioritize?",
+                "whyItMatters": "This puts pressure on your cash reserves.",
+                "ifYouDoThis": "Prioritize high-interest debts and collect receivables faster.",
+                "actionView": "ledger",
+                "actionLabel": "View Debts"
+            })
+    
+    # Profile completion nudge (if profile is incomplete and we have room)
+    if user_profile and len(nuggets) < 5:
+        profile_fields = ['business_name', 'business_type', 'industry', 'business_size', 'location']
+        missing = [f for f in profile_fields if not user_profile.get(f)]
+        if len(missing) >= 3:
+            nuggets.append({
+                "icon": "fa-user-pen",
+                "label": "Complete your profile",
+                "value": "Get personalized insights",
+                "color": "from-cyan-500 to-teal-600",
+                "prompt": "How can completing my business profile help me get better financial advice?",
+                "whyItMatters": "We can give you industry-specific tips with a complete profile.",
+                "ifYouDoThis": "Take 2 minutes to add your business details for tailored recommendations.",
+                "actionView": "home",
+                "actionLabel": "Update Profile"
+            })
+    
+    return nuggets[:5]
+
+
 def generate_proactive_nudges(
     transactions: List[Dict[str, Any]],
     budgets: List[Dict[str, Any]],
@@ -1007,4 +1435,215 @@ def generate_proactive_nudges(
             "days_left_month": days_left_month
         },
         "generated_at": now.isoformat()
+    }
+
+
+CONTACT_TIPS_SYSTEM_INSTRUCTION = """
+You are Bizzy, an AI business advisor analyzing customer/contact payment behavior.
+Given a contact's transaction history, provide a brief, actionable tip about this person.
+
+### ANALYSIS CRITERIA:
+1. **Payment timeliness**: Do they pay on time, early, or late?
+2. **Payment consistency**: Do they always pay in full or partial?
+3. **Credit risk**: Based on history, are they reliable for credit sales?
+4. **Relationship value**: Total business volume with them
+
+### RESPONSE FORMAT:
+Return a JSON object with:
+{
+  "tip": "One sentence tip about this contact (max 100 chars)",
+  "sentiment": "positive" | "neutral" | "warning" | "negative",
+  "recommendation": "One actionable recommendation (max 150 chars)"
+}
+
+### EXAMPLES:
+- Positive: {"tip": "Excellent payer! Always pays within 3 days.", "sentiment": "positive", "recommendation": "Safe to extend credit. Consider offering loyalty discounts."}
+- Warning: {"tip": "Often pays 2-3 weeks late.", "sentiment": "warning", "recommendation": "Request partial payment upfront for large orders."}
+- Negative: {"tip": "Has 3 overdue invoices totaling $500.", "sentiment": "negative", "recommendation": "Do not extend more credit until settled."}
+- Neutral: {"tip": "New contact, limited payment history.", "sentiment": "neutral", "recommendation": "Start with smaller credit limits to build trust."}
+
+### RULES:
+- Be concise and direct
+- Focus on actionable business advice
+- Use the provided currency symbol
+- If no debt transactions, focus on transaction volume and frequency
+"""
+
+
+async def generate_contact_tips(
+    contact_name: str,
+    contact_transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """
+    Generate AI-powered tips about a contact's payment behavior.
+    """
+    default_tip = {
+        "tip": "No transaction history yet.",
+        "sentiment": "neutral",
+        "recommendation": "Build relationship with small transactions first."
+    }
+    
+    if not contact_transactions:
+        return default_tip
+    
+    if not settings.GEMINI_API_KEY:
+        return generate_contact_tips_fallback(contact_name, contact_transactions, currency_symbol)
+    
+    try:
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        
+        # Prepare transaction summary
+        now = datetime.utcnow()
+        
+        # Categorize transactions
+        credit_sales = [t for t in contact_transactions if t.get('type') in ['credit_receivable', 'loan_receivable']]
+        credit_purchases = [t for t in contact_transactions if t.get('type') in ['credit_payable', 'loan_payable']]
+        payments_received = [t for t in contact_transactions if t.get('type') == 'payment_received']
+        payments_made = [t for t in contact_transactions if t.get('type') == 'payment_made']
+        
+        total_receivable = sum(t.get('remaining_amount', t.get('amount', 0)) for t in credit_sales if t.get('status') != 'settled')
+        total_payable = sum(t.get('remaining_amount', t.get('amount', 0)) for t in credit_purchases if t.get('status') != 'settled')
+        
+        # Calculate payment behavior
+        overdue_count = 0
+        on_time_count = 0
+        for t in credit_sales:
+            if t.get('due_date') and t.get('status') == 'settled':
+                due_date = datetime.fromisoformat(t['due_date'].replace('Z', '+00:00').replace('+00:00', ''))
+                # Check if there's a linked payment
+                linked_payments = [p for p in payments_received if p.get('linked_transaction_id') == t.get('id')]
+                if linked_payments:
+                    payment_date = datetime.fromisoformat(linked_payments[0]['date'].replace('Z', '+00:00').replace('+00:00', ''))
+                    if payment_date > due_date:
+                        overdue_count += 1
+                    else:
+                        on_time_count += 1
+            elif t.get('due_date') and t.get('status') != 'settled':
+                due_date = datetime.fromisoformat(t['due_date'].replace('Z', '+00:00').replace('+00:00', ''))
+                if due_date < now:
+                    overdue_count += 1
+        
+        context = f"""
+CONTACT: {contact_name}
+CURRENCY: {currency_symbol}
+
+CURRENT BALANCES:
+- They owe me: {currency_symbol}{total_receivable:,.0f}
+- I owe them: {currency_symbol}{total_payable:,.0f}
+
+TRANSACTION HISTORY:
+- Credit sales to them: {len(credit_sales)} transactions
+- Payments received from them: {len(payments_received)} payments
+- Credit purchases from them: {len(credit_purchases)} transactions
+- Payments made to them: {len(payments_made)} payments
+
+PAYMENT BEHAVIOR:
+- Overdue/late payments: {overdue_count}
+- On-time payments: {on_time_count}
+
+RECENT TRANSACTIONS (last 5):
+"""
+        for t in contact_transactions[:5]:
+            t_type = t.get('type', 'unknown')
+            t_amount = t.get('amount', 0)
+            t_date = t.get('date', 'unknown')[:10]
+            t_status = t.get('status', 'unknown')
+            context += f"- {t_date}: {t_type} {currency_symbol}{t_amount:,.0f} ({t_status})\n"
+        
+        response = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=context,
+            config=types.GenerateContentConfig(
+                system_instruction=CONTACT_TIPS_SYSTEM_INSTRUCTION,
+                temperature=0.3,
+                max_output_tokens=300,
+            ),
+        )
+        
+        response_text = response.text.strip()
+        
+        # Parse JSON response
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+        response_text = response_text.strip()
+        
+        tip_data = json.loads(response_text)
+        
+        # Validate response
+        if not all(k in tip_data for k in ['tip', 'sentiment', 'recommendation']):
+            return generate_contact_tips_fallback(contact_name, contact_transactions, currency_symbol)
+        
+        if tip_data['sentiment'] not in ['positive', 'neutral', 'warning', 'negative']:
+            tip_data['sentiment'] = 'neutral'
+        
+        return tip_data
+        
+    except Exception as e:
+        print(f"AI contact tips generation failed: {e}")
+        return generate_contact_tips_fallback(contact_name, contact_transactions, currency_symbol)
+
+
+def generate_contact_tips_fallback(
+    contact_name: str,
+    contact_transactions: List[Dict[str, Any]],
+    currency_symbol: str = "$"
+) -> Dict[str, Any]:
+    """
+    Fallback rule-based contact tips when AI is unavailable.
+    """
+    if not contact_transactions:
+        return {
+            "tip": "No transaction history yet.",
+            "sentiment": "neutral",
+            "recommendation": "Build relationship with small transactions first."
+        }
+    
+    now = datetime.utcnow()
+    
+    credit_sales = [t for t in contact_transactions if t.get('type') in ['credit_receivable', 'loan_receivable']]
+    payments_received = [t for t in contact_transactions if t.get('type') == 'payment_received']
+    
+    total_receivable = sum(t.get('remaining_amount', t.get('amount', 0)) for t in credit_sales if t.get('status') != 'settled')
+    
+    # Check for overdue
+    overdue_amount = 0
+    overdue_count = 0
+    for t in credit_sales:
+        if t.get('due_date') and t.get('status') != 'settled':
+            try:
+                due_date = datetime.fromisoformat(t['due_date'].replace('Z', '+00:00').replace('+00:00', ''))
+                if due_date < now:
+                    overdue_amount += t.get('remaining_amount', t.get('amount', 0))
+                    overdue_count += 1
+            except:
+                pass
+    
+    if overdue_count > 0:
+        return {
+            "tip": f"Has {overdue_count} overdue invoice(s) totaling {currency_symbol}{overdue_amount:,.0f}.",
+            "sentiment": "negative" if overdue_count > 1 else "warning",
+            "recommendation": "Follow up on overdue payments before extending more credit."
+        }
+    
+    if total_receivable > 0:
+        return {
+            "tip": f"Currently owes {currency_symbol}{total_receivable:,.0f}.",
+            "sentiment": "neutral",
+            "recommendation": "Monitor payment timeline and send reminders if needed."
+        }
+    
+    if len(payments_received) >= 3:
+        return {
+            "tip": f"Good payment history with {len(payments_received)} completed payments.",
+            "sentiment": "positive",
+            "recommendation": "Reliable customer. Safe to extend reasonable credit."
+        }
+    
+    return {
+        "tip": f"Limited history: {len(contact_transactions)} transaction(s).",
+        "sentiment": "neutral",
+        "recommendation": "Start with smaller credit limits to assess reliability."
     }

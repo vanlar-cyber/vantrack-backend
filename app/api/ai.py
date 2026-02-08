@@ -40,6 +40,8 @@ async def parse_input(
             language_code=request.language_code or current_user.preferred_language,
             attachments=attachments
         )
+
+        print("Result:", result)
         
         transactions = [
             ParsedTransaction(
@@ -75,8 +77,8 @@ async def parse_input(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"AI processing error: {str(e)}"
-        )
+    # except Exception as e:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    #         detail=f"AI processing error: {str(e)}"
+    #     )

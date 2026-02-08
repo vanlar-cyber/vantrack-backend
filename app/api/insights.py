@@ -9,7 +9,7 @@ from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.contact import Contact
 from app.api.deps import get_current_user
-from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons, calculate_smart_predictions, generate_proactive_nudges
+from app.services.insights_service import generate_weekly_summary, answer_financial_question, calculate_health_score, generate_health_tips, calculate_spending_comparisons, calculate_smart_predictions, generate_proactive_nudges, generate_action_nuggets_ai, generate_contact_tips
 from app.models.budget import Budget
 
 router = APIRouter(prefix="/insights", tags=["Insights"])
@@ -121,6 +121,22 @@ class SmartPredictionsResponse(BaseModel):
     bill_reminders: list[BillReminder]
     debt_payoff: DebtPayoff
     generated_at: str
+
+
+class ActionNugget(BaseModel):
+    icon: str
+    label: str
+    value: str
+    color: str
+    prompt: str
+    whyItMatters: str
+    ifYouDoThis: str
+    actionView: Optional[str] = None
+    actionLabel: Optional[str] = None
+
+
+class ActionNuggetsResponse(BaseModel):
+    nuggets: list[ActionNugget]
 
 
 class NudgeDetails(BaseModel):
@@ -399,6 +415,120 @@ async def get_smart_predictions(
     )
 
 
+@router.get("/action-nuggets", response_model=ActionNuggetsResponse)
+async def get_action_nuggets(
+    currency_symbol: str = "$",
+    force_refresh: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get data-driven action nuggets for the Daily Decision Feed.
+    These are prioritized, actionable insights based on the user's financial data.
+    
+    Nuggets are cached and regenerated when:
+    - Cache is older than 4 hours
+    - Transaction data has changed significantly
+    - force_refresh=true is passed
+    """
+    import json
+    import hashlib
+    from datetime import datetime, timedelta
+    
+    CACHE_TTL_HOURS = 4
+    
+    # Fetch all user transactions
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.user_id == current_user.id)
+        .order_by(Transaction.date.desc())
+    )
+    transactions = result.scalars().all()
+    
+    # Create a hash of transaction state to detect meaningful changes
+    # Includes: count, total income/expense, receivables/payables, recent tx IDs+amounts, upcoming due dates
+    total_income = sum(tx.amount for tx in transactions if tx.type and tx.type.value == 'income')
+    total_expense = sum(tx.amount for tx in transactions if tx.type and tx.type.value == 'expense')
+    total_receivable = sum(tx.remaining_amount or 0 for tx in transactions if tx.type and tx.type.value == 'receivable')
+    total_payable = sum(tx.remaining_amount or 0 for tx in transactions if tx.type and tx.type.value == 'payable')
+    
+    # Include recent transaction IDs and amounts (catches edits to existing transactions)
+    recent_tx_data = [(str(tx.id), tx.amount, tx.remaining_amount or 0) for tx in transactions[:20]]
+    
+    # Include upcoming due dates (next 7 days) - invalidates when bills become due
+    from datetime import date
+    today = date.today()
+    week_later = today + timedelta(days=7)
+    upcoming_due = sorted([
+        tx.due_date.isoformat() for tx in transactions 
+        if tx.due_date and today <= tx.due_date.date() <= week_later
+    ])
+    
+    # Include user profile fields (so cache invalidates when profile is updated)
+    profile_data = f"{current_user.business_name}|{current_user.business_type}|{current_user.industry}|{current_user.business_size}|{current_user.location}"
+    
+    tx_summary = f"{len(transactions)}|{total_income:.2f}|{total_expense:.2f}|{total_receivable:.2f}|{total_payable:.2f}|{recent_tx_data}|{upcoming_due}|{profile_data}"
+    tx_hash = hashlib.md5(tx_summary.encode()).hexdigest()
+    
+    # Check if we can use cached nuggets
+    now = datetime.utcnow()
+    cache_valid = (
+        not force_refresh
+        and current_user.cached_action_nuggets
+        and current_user.action_nuggets_generated_at
+        and current_user.action_nuggets_tx_hash == tx_hash
+        and (now - current_user.action_nuggets_generated_at) < timedelta(hours=CACHE_TTL_HOURS)
+    )
+    
+    if cache_valid:
+        # Return cached nuggets
+        try:
+            cached = json.loads(current_user.cached_action_nuggets)
+            return ActionNuggetsResponse(nuggets=cached)
+        except json.JSONDecodeError:
+            pass  # Cache corrupted, regenerate
+    
+    # Convert to dict format for AI processing
+    tx_data = [
+        {
+            "id": str(tx.id),
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "description": tx.description,
+            "category": tx.category,
+            "type": tx.type.value if tx.type else None,
+            "contact_name": tx.contact_name,
+            "remaining_amount": tx.remaining_amount,
+            "status": tx.status.value if tx.status else None,
+            "due_date": tx.due_date.isoformat() if tx.due_date else None,
+        }
+        for tx in transactions
+    ]
+    
+    # Build user profile dict for AI context
+    user_profile = {
+        "full_name": current_user.full_name,
+        "business_name": current_user.business_name,
+        "business_type": current_user.business_type,
+        "industry": current_user.industry,
+        "business_size": current_user.business_size,
+        "location": current_user.location,
+        "years_in_business": current_user.years_in_business,
+        "monthly_revenue_range": current_user.monthly_revenue_range,
+    }
+    
+    # Generate AI-powered action nuggets
+    nuggets = await generate_action_nuggets_ai(tx_data, currency_symbol, user_profile)
+    
+    # Cache the results
+    current_user.cached_action_nuggets = json.dumps(nuggets)
+    current_user.action_nuggets_generated_at = now
+    current_user.action_nuggets_tx_hash = tx_hash
+    await db.commit()
+    
+    return ActionNuggetsResponse(nuggets=nuggets)
+
+
 @router.get("/nudges", response_model=ProactiveNudgesResponse)
 async def get_proactive_nudges(
     currency_symbol: str = "$",
@@ -467,4 +597,150 @@ async def get_proactive_nudges(
         nudges=nudges_data["nudges"],
         summary=nudges_data["summary"],
         generated_at=nudges_data["generated_at"]
+    )
+
+
+class ContactTipResponse(BaseModel):
+    tip: str
+    sentiment: str
+    recommendation: str
+
+
+class ContactTipWithId(BaseModel):
+    contact_id: str
+    contact_name: str
+    tip: str
+    sentiment: str
+    recommendation: str
+
+
+class AllContactTipsResponse(BaseModel):
+    tips: list[ContactTipWithId]
+
+
+@router.get("/contact-tips", response_model=AllContactTipsResponse)
+async def get_all_contact_tips(
+    currency_symbol: str = "$",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get AI-generated tips for all contacts with transactions (prioritizes warnings/negatives)."""
+    
+    # Get all contacts
+    contacts_result = await db.execute(
+        select(Contact).where(Contact.user_id == current_user.id)
+    )
+    contacts = contacts_result.scalars().all()
+    
+    if not contacts:
+        return AllContactTipsResponse(tips=[])
+    
+    # Get all transactions
+    tx_result = await db.execute(
+        select(Transaction).where(Transaction.user_id == current_user.id)
+        .order_by(Transaction.date.desc())
+    )
+    all_transactions = tx_result.scalars().all()
+    
+    # Group transactions by contact
+    contact_txs: dict[str, list] = {str(c.id): [] for c in contacts}
+    contact_names: dict[str, str] = {str(c.id): c.name for c in contacts}
+    
+    for tx in all_transactions:
+        contact_id = str(tx.contact_id) if tx.contact_id else None
+        if not contact_id:
+            # Try to match by name
+            for c in contacts:
+                if tx.contact_name and tx.contact_name.lower() == c.name.lower():
+                    contact_id = str(c.id)
+                    break
+        
+        if contact_id and contact_id in contact_txs:
+            contact_txs[contact_id].append({
+                "id": str(tx.id),
+                "date": tx.date.isoformat() if tx.date else None,
+                "amount": tx.amount,
+                "description": tx.description,
+                "type": tx.type.value if tx.type else None,
+                "status": tx.status.value if tx.status else None,
+                "remaining_amount": tx.remaining_amount,
+                "due_date": tx.due_date.isoformat() if tx.due_date else None,
+                "linked_transaction_id": str(tx.linked_transaction_id) if tx.linked_transaction_id else None,
+            })
+    
+    # Generate tips for contacts with transactions (prioritize those with debt)
+    tips = []
+    for contact_id, txs in contact_txs.items():
+        if not txs:
+            continue
+        
+        tip_data = await generate_contact_tips(contact_names[contact_id], txs, currency_symbol)
+        tips.append(ContactTipWithId(
+            contact_id=contact_id,
+            contact_name=contact_names[contact_id],
+            tip=tip_data["tip"],
+            sentiment=tip_data["sentiment"],
+            recommendation=tip_data["recommendation"]
+        ))
+    
+    # Sort: negative first, then warning, then others
+    sentiment_order = {"negative": 0, "warning": 1, "neutral": 2, "positive": 3}
+    tips.sort(key=lambda x: sentiment_order.get(x.sentiment, 2))
+    
+    return AllContactTipsResponse(tips=tips)
+
+
+@router.get("/contact-tip/{contact_id}", response_model=ContactTipResponse)
+async def get_contact_tip(
+    contact_id: str,
+    currency_symbol: str = "$",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get AI-generated tip about a contact's payment behavior."""
+    
+    # Get the contact
+    contact_result = await db.execute(
+        select(Contact).where(
+            Contact.id == contact_id,
+            Contact.user_id == current_user.id
+        )
+    )
+    contact = contact_result.scalar_one_or_none()
+    
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    # Get all transactions related to this contact
+    tx_result = await db.execute(
+        select(Transaction).where(
+            Transaction.user_id == current_user.id,
+            (Transaction.contact_id == contact_id) | (Transaction.contact_name == contact.name)
+        ).order_by(Transaction.date.desc())
+    )
+    transactions = tx_result.scalars().all()
+    
+    # Convert to dict format
+    tx_data = [
+        {
+            "id": str(tx.id),
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "description": tx.description,
+            "type": tx.type.value if tx.type else None,
+            "status": tx.status.value if tx.status else None,
+            "remaining_amount": tx.remaining_amount,
+            "due_date": tx.due_date.isoformat() if tx.due_date else None,
+            "linked_transaction_id": str(tx.linked_transaction_id) if tx.linked_transaction_id else None,
+        }
+        for tx in transactions
+    ]
+    
+    # Generate tip
+    tip_data = await generate_contact_tips(contact.name, tx_data, currency_symbol)
+    
+    return ContactTipResponse(
+        tip=tip_data["tip"],
+        sentiment=tip_data["sentiment"],
+        recommendation=tip_data["recommendation"]
     )

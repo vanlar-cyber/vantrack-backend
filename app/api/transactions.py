@@ -349,6 +349,67 @@ async def update_transaction(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
     
     update_data = tx_update.model_dump(exclude_unset=True)
+    
+    # If amount is being updated for credit/loan transactions, adjust remaining_amount proportionally
+    if 'amount' in update_data and tx.type and tx.type.value in ['credit_receivable', 'credit_payable', 'loan_receivable', 'loan_payable']:
+        old_amount = tx.amount
+        new_amount = update_data['amount']
+        old_remaining = tx.remaining_amount if tx.remaining_amount is not None else old_amount
+        
+        if old_amount > 0:
+            # Calculate how much has been paid
+            paid_amount = old_amount - old_remaining
+            # New remaining = new amount - paid amount (but not less than 0)
+            new_remaining = max(0, new_amount - paid_amount)
+            update_data['remaining_amount'] = new_remaining
+            
+            # Update status if fully paid
+            if new_remaining <= 0:
+                update_data['status'] = 'settled'
+            elif tx.status and tx.status.value == 'settled':
+                update_data['status'] = 'pending'
+    
+    # If amount is being updated for payment_received/payment_made, update the linked transaction's remaining_amount
+    print(f"[DEBUG] Checking payment update: type={tx.type.value if tx.type else None}, linked_id={tx.linked_transaction_id}")
+    if 'amount' in update_data and tx.type and tx.type.value in ['payment_received', 'payment_made'] and tx.linked_transaction_id:
+        old_payment_amount = tx.amount
+        new_payment_amount = update_data['amount']
+        payment_diff = new_payment_amount - old_payment_amount  # positive if payment increased
+        
+        print(f"[DEBUG] Payment update: old={old_payment_amount}, new={new_payment_amount}, diff={payment_diff}")
+        
+        # Get the linked transaction (the original credit/loan)
+        linked_result = await db.execute(
+            select(Transaction).where(
+                Transaction.id == tx.linked_transaction_id,
+                Transaction.user_id == current_user.id
+            )
+        )
+        linked_tx = linked_result.scalar_one_or_none()
+        
+        print(f"[DEBUG] Linked tx found: {linked_tx is not None}")
+        
+        if linked_tx:
+            # Adjust the linked transaction's remaining amount
+            current_remaining = linked_tx.remaining_amount if linked_tx.remaining_amount is not None else linked_tx.amount
+            new_remaining = max(0, current_remaining - payment_diff)
+            
+            print(f"[DEBUG] Linked tx: current_remaining={current_remaining}, new_remaining={new_remaining}")
+            
+            linked_tx.remaining_amount = new_remaining
+            
+            # Update status if fully paid
+            if new_remaining <= 0:
+                linked_tx.status = 'settled'
+            elif linked_tx.status and linked_tx.status.value == 'settled':
+                linked_tx.status = 'pending'
+            
+            # Explicitly add to session to ensure it's tracked
+            db.add(linked_tx)
+            print(f"[DEBUG] Linked tx added to session, remaining_amount set to {linked_tx.remaining_amount}")
+    else:
+        print(f"[DEBUG] Payment condition not met")
+    
     for field, value in update_data.items():
         setattr(tx, field, value)
     
