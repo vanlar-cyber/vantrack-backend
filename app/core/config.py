@@ -1,3 +1,4 @@
+import os
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -7,8 +8,7 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     
-    # Database - can use DATABASE_URL directly (Render style) or individual vars
-    DATABASE_URL_ENV: Optional[str] = None  # Direct DATABASE_URL from environment
+    # Database - individual vars (fallback)
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: str = "5432"
     POSTGRES_USER: str = "vantrack"
@@ -17,24 +17,26 @@ class Settings(BaseSettings):
     
     @property
     def DATABASE_URL(self) -> str:
-        if self.DATABASE_URL_ENV:
+        # Check for DATABASE_URL env var directly (Render sets this)
+        env_url = os.environ.get("DATABASE_URL")
+        if env_url:
             # Convert postgres:// to postgresql+asyncpg:// for async driver
-            url = self.DATABASE_URL_ENV
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-            elif url.startswith("postgresql://"):
-                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            return url
+            if env_url.startswith("postgres://"):
+                return env_url.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif env_url.startswith("postgresql://"):
+                return env_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            return env_url
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
     
     @property
     def DATABASE_URL_SYNC(self) -> str:
-        if self.DATABASE_URL_ENV:
+        # Check for DATABASE_URL env var directly (Render sets this)
+        env_url = os.environ.get("DATABASE_URL")
+        if env_url:
             # Use sync driver
-            url = self.DATABASE_URL_ENV
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-            return url
+            if env_url.startswith("postgres://"):
+                return env_url.replace("postgres://", "postgresql://", 1)
+            return env_url
         return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
     
     # JWT
